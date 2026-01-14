@@ -91,3 +91,89 @@ impl From<Room> for CreateRoomResponse {
         }
     }
 }
+
+/// Room invitation for sharing meeting links
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomInvitation {
+    pub token: String,
+    pub room_id: String,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub max_uses: Option<u32>,
+    pub uses: u32,
+}
+
+impl RoomInvitation {
+    pub fn new(room_id: String, created_by: String, ttl_seconds: u64, max_uses: Option<u32>) -> Self {
+        let now = Utc::now();
+        Self {
+            token: Self::generate_token(),
+            room_id,
+            created_by,
+            created_at: now,
+            expires_at: now + chrono::Duration::seconds(ttl_seconds as i64),
+            max_uses,
+            uses: 0,
+        }
+    }
+
+    fn generate_token() -> String {
+        use rand::Rng;
+        const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        let mut rng = rand::rng();
+        (0..16)
+            .map(|_| {
+                let idx = rng.random_range(0..CHARSET.len());
+                CHARSET[idx] as char
+            })
+            .collect()
+    }
+
+    pub fn is_valid(&self) -> bool {
+        let now = Utc::now();
+        if now > self.expires_at {
+            return false;
+        }
+        if let Some(max) = self.max_uses {
+            if self.uses >= max {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Request to create an invitation
+#[derive(Debug, Deserialize)]
+pub struct CreateInvitationRequest {
+    /// TTL in seconds (default: 24 hours)
+    #[serde(default = "default_invitation_ttl")]
+    pub ttl_seconds: u64,
+    /// Maximum number of uses (None = unlimited)
+    pub max_uses: Option<u32>,
+}
+
+fn default_invitation_ttl() -> u64 {
+    86400 // 24 hours
+}
+
+/// Response after creating an invitation
+#[derive(Debug, Serialize)]
+pub struct CreateInvitationResponse {
+    pub token: String,
+    pub room_id: String,
+    pub expires_at: DateTime<Utc>,
+    pub max_uses: Option<u32>,
+    pub invite_url: String,
+}
+
+/// Response when validating an invitation
+#[derive(Debug, Serialize)]
+pub struct InvitationInfo {
+    pub token: String,
+    pub room_id: String,
+    pub room_name: String,
+    pub expires_at: DateTime<Utc>,
+    pub is_valid: bool,
+}

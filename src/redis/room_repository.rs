@@ -3,7 +3,7 @@ use deadpool_redis::Pool;
 use redis::AsyncCommands;
 
 use crate::error::{AppError, Result};
-use crate::models::{PublisherInfo, Room, RoomInfo, RoomStatus, WsSession};
+use crate::models::{PublisherInfo, Room, RoomInfo, RoomInvitation, RoomStatus, WsSession};
 
 /// Room repository for Redis operations
 #[derive(Clone)]
@@ -326,5 +326,120 @@ impl RoomRepository {
             .map_err(|e| AppError::RedisError(e.to_string()))?;
 
         Ok(pong == "PONG")
+    }
+
+    // ==================== Invitation Operations ====================
+
+    /// Create a room invitation
+    pub async fn create_invitation(&self, invitation: &RoomInvitation) -> Result<()> {
+        let mut conn = self.pool.get().await?;
+        let key = format!("invite:{}", invitation.token);
+        let json = serde_json::to_string(invitation)?;
+
+        let ttl = (invitation.expires_at - Utc::now()).num_seconds().max(1) as i64;
+
+        redis::cmd("SETEX")
+            .arg(&key)
+            .arg(ttl)
+            .arg(&json)
+            .query_async::<()>(&mut *conn)
+            .await?;
+
+        // Also add to room's invitation set for tracking
+        let room_invites_key = format!("room:{}:invites", invitation.room_id);
+        conn.sadd::<_, _, ()>(&room_invites_key, &invitation.token).await?;
+
+        tracing::info!(
+            token = %invitation.token,
+            room_id = %invitation.room_id,
+            "Invitation created"
+        );
+        Ok(())
+    }
+
+    /// Get an invitation by token
+    pub async fn get_invitation(&self, token: &str) -> Result<Option<RoomInvitation>> {
+        let mut conn = self.pool.get().await?;
+        let key = format!("invite:{}", token);
+
+        let json: Option<String> = conn.get(&key).await?;
+
+        match json {
+            Some(data) => {
+                let invitation: RoomInvitation = serde_json::from_str(&data)?;
+                Ok(Some(invitation))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Increment invitation use count
+    pub async fn use_invitation(&self, token: &str) -> Result<bool> {
+        let mut invitation = match self.get_invitation(token).await? {
+            Some(inv) => inv,
+            None => return Ok(false),
+        };
+
+        if !invitation.is_valid() {
+            return Ok(false);
+        }
+
+        invitation.uses += 1;
+
+        let mut conn = self.pool.get().await?;
+        let key = format!("invite:{}", token);
+        let json = serde_json::to_string(&invitation)?;
+
+        let ttl = (invitation.expires_at - Utc::now()).num_seconds().max(1) as i64;
+
+        redis::cmd("SETEX")
+            .arg(&key)
+            .arg(ttl)
+            .arg(&json)
+            .query_async::<()>(&mut *conn)
+            .await?;
+
+        tracing::debug!(token = %token, uses = %invitation.uses, "Invitation used");
+        Ok(true)
+    }
+
+    /// Delete an invitation
+    pub async fn delete_invitation(&self, token: &str) -> Result<()> {
+        let invitation = match self.get_invitation(token).await? {
+            Some(inv) => inv,
+            None => return Ok(()),
+        };
+
+        let mut conn = self.pool.get().await?;
+        let key = format!("invite:{}", token);
+
+        conn.del::<_, ()>(&key).await?;
+
+        // Remove from room's invitation set
+        let room_invites_key = format!("room:{}:invites", invitation.room_id);
+        conn.srem::<_, _, ()>(&room_invites_key, token).await?;
+
+        tracing::info!(token = %token, "Invitation deleted");
+        Ok(())
+    }
+
+    /// Get all invitations for a room
+    pub async fn get_room_invitations(&self, room_id: &str) -> Result<Vec<RoomInvitation>> {
+        let mut conn = self.pool.get().await?;
+        let room_invites_key = format!("room:{}:invites", room_id);
+
+        let tokens: Vec<String> = conn.smembers(&room_invites_key).await?;
+
+        let mut invitations = Vec::new();
+        for token in tokens {
+            if let Some(invitation) = self.get_invitation(&token).await? {
+                invitations.push(invitation);
+            } else {
+                // Clean up expired invitation reference
+                conn.srem::<_, _, ()>(&room_invites_key, &token).await?;
+            }
+        }
+
+        Ok(invitations)
     }
 }

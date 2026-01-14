@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::error::{AppError, Result};
 use crate::models::{
-    CreateRoomRequest, CreateRoomResponse, IceServer, JoinRequest, JoinResponse, PublisherInfo,
-    Room,
+    CreateInvitationRequest, CreateInvitationResponse, CreateRoomRequest, CreateRoomResponse,
+    IceServer, InvitationInfo, JoinRequest, JoinResponse, PublisherInfo, Room, RoomInvitation,
 };
 use crate::state::AppState;
 
@@ -19,6 +19,10 @@ pub fn room_routes() -> Router<AppState> {
         .route("/{room_id}", get(get_room))
         .route("/{room_id}/join", post(join_room))
         .route("/{room_id}/leave", post(leave_room))
+        .route("/{room_id}/invite", post(create_invitation))
+        .route("/{room_id}/invites", get(list_invitations))
+        .route("/invite/{token}", get(get_invitation))
+        .route("/invite/{token}/use", post(use_invitation))
 }
 
 /// POST /api/v1/rooms - Create a new room
@@ -184,4 +188,144 @@ pub fn create_publisher_info(user_id: &str, feed_id: &str, display: &str) -> Pub
         display: display.to_string(),
         joined_at: chrono::Utc::now(),
     }
+}
+
+/// POST /api/v1/rooms/:room_id/invite - Create an invitation link
+async fn create_invitation(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    Json(request): Json<CreateInvitationRequest>,
+) -> Result<Json<CreateInvitationResponse>> {
+    // Validate UUID format
+    Uuid::parse_str(&room_id)
+        .map_err(|_| AppError::BadRequest("Invalid room ID format".to_string()))?;
+
+    // Check room exists
+    let _room = state
+        .room_repo
+        .get_room(&room_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Room {} not found", room_id)))?;
+
+    // Create invitation
+    let invitation = RoomInvitation::new(
+        room_id.clone(),
+        "system".to_string(), // TODO: Get from auth when implemented
+        request.ttl_seconds,
+        request.max_uses,
+    );
+
+    // Save to Redis
+    state.room_repo.create_invitation(&invitation).await?;
+
+    // Build invite URL
+    let invite_url = format!(
+        "http://{}:{}/invite/{}",
+        state.config.frontend_host.as_deref().unwrap_or("localhost"),
+        state.config.frontend_port.unwrap_or(3000),
+        invitation.token
+    );
+
+    tracing::info!(
+        room_id = %room_id,
+        token = %invitation.token,
+        "Invitation created"
+    );
+
+    Ok(Json(CreateInvitationResponse {
+        token: invitation.token,
+        room_id,
+        expires_at: invitation.expires_at,
+        max_uses: invitation.max_uses,
+        invite_url,
+    }))
+}
+
+/// GET /api/v1/rooms/:room_id/invites - List all invitations for a room
+async fn list_invitations(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+) -> Result<Json<Vec<RoomInvitation>>> {
+    // Validate UUID format
+    Uuid::parse_str(&room_id)
+        .map_err(|_| AppError::BadRequest("Invalid room ID format".to_string()))?;
+
+    // Check room exists
+    let _room = state
+        .room_repo
+        .get_room(&room_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Room {} not found", room_id)))?;
+
+    let invitations = state.room_repo.get_room_invitations(&room_id).await?;
+
+    Ok(Json(invitations))
+}
+
+/// GET /api/v1/rooms/invite/:token - Get invitation info
+async fn get_invitation(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Result<Json<InvitationInfo>> {
+    let invitation = state
+        .room_repo
+        .get_invitation(&token)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Invitation not found or expired".to_string()))?;
+
+    // Check validity before moving values
+    let is_valid = invitation.is_valid();
+
+    // Get room info
+    let room = state
+        .room_repo
+        .get_room(&invitation.room_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Room no longer exists".to_string()))?;
+
+    Ok(Json(InvitationInfo {
+        token: invitation.token,
+        room_id: invitation.room_id,
+        room_name: room.name,
+        expires_at: invitation.expires_at,
+        is_valid,
+    }))
+}
+
+/// POST /api/v1/rooms/invite/:token/use - Use an invitation
+async fn use_invitation(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Result<Json<InvitationInfo>> {
+    let invitation = state
+        .room_repo
+        .get_invitation(&token)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Invitation not found or expired".to_string()))?;
+
+    if !invitation.is_valid() {
+        return Err(AppError::BadRequest(
+            "Invitation is expired or has reached maximum uses".to_string(),
+        ));
+    }
+
+    // Get room info
+    let room = state
+        .room_repo
+        .get_room(&invitation.room_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Room no longer exists".to_string()))?;
+
+    // Increment use count
+    state.room_repo.use_invitation(&token).await?;
+
+    tracing::info!(token = %token, room_id = %invitation.room_id, "Invitation used");
+
+    Ok(Json(InvitationInfo {
+        token: invitation.token,
+        room_id: invitation.room_id,
+        room_name: room.name,
+        expires_at: invitation.expires_at,
+        is_valid: true,
+    }))
 }
