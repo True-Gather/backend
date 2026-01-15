@@ -229,6 +229,18 @@ cargo fmt
 cargo clippy
 ```
 
+
+Utilise la bonne commande : docker compose (pas docker-compose)
+
+Depuis la racine de TrueGather (où est ton compose) :
+
+cd ~/TrueGather
+docker compose up -d redis
+
+
+(Si tu lances depuis backend/ :)
+
+docker compose -f ../docker-compose.yml up -d redis
 ## 📄 Licence
 
 MIT License - voir [LICENSE](LICENSE)
