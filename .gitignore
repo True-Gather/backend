@@ -18,3 +18,4 @@
 .env
 .env.*
 !.env.example
+backend_sans_le_dossier_target.zip
