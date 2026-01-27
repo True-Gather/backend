@@ -13,6 +13,8 @@ pub struct Config {
     pub turn_server: Option<String>,
     pub turn_username: Option<String>,
     pub turn_credential: Option<String>,
+    pub mail_from: Option<String>,
+    pub resend_api_key: Option<String>,
     pub frontend_host: Option<String>,
     pub frontend_port: Option<u16>,
 }
@@ -47,6 +49,8 @@ impl Config {
             turn_server: env::var("TURN_SERVER").ok(),
             turn_username: env::var("TURN_USERNAME").ok(),
             turn_credential: env::var("TURN_CREDENTIAL").ok(),
+            mail_from: env::var("MAIL_FROM").ok(),
+            resend_api_key: env::var("RESEND_API_KEY").ok(),
             frontend_host: env::var("FRONTEND_HOST").ok(),
             frontend_port: env::var("FRONTEND_PORT")
                 .ok()

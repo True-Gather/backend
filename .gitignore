@@ -4,3 +4,17 @@
 *.log
 *.bak
 .DS_Store
+
+# Secrets
+.env
+.env.*
+
+# Secrets
+.env
+.env.*
+\!.env.example
+
+# Secrets
+.env
+.env.*
+!.env.example

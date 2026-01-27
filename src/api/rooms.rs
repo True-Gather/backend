@@ -9,6 +9,7 @@ use crate::error::{AppError, Result};
 use crate::models::{
     CreateInvitationRequest, CreateInvitationResponse, CreateRoomRequest, CreateRoomResponse,
     IceServer, InvitationInfo, JoinRequest, JoinResponse, PublisherInfo, Room, RoomInvitation,
+    InviteEmailRequest, InviteEmailResponse,
 };
 use crate::state::AppState;
 
@@ -21,6 +22,7 @@ pub fn room_routes() -> Router<AppState> {
         .route("/{room_id}/leave", post(leave_room))
         .route("/{room_id}/invite", post(create_invitation))
         .route("/{room_id}/invites", get(list_invitations))
+        .route("/{room_id}/invite-email", post(send_invite_email))
         .route("/invite/{token}", get(get_invitation))
         .route("/invite/{token}/use", post(use_invitation))
 }
@@ -327,5 +329,74 @@ async fn use_invitation(
         room_name: room.name,
         expires_at: invitation.expires_at,
         is_valid: true,
+    }))
+}
+
+/// POST /api/v1/rooms/{room_id}/invite-email
+/// Sends an invitation email via configured mail provider (Resend).
+async fn send_invite_email(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    Json(request): Json<InviteEmailRequest>,
+) -> Result<Json<InviteEmailResponse>> {
+    // Validate UUID format (same behavior as other endpoints)
+    Uuid::parse_str(&room_id)
+        .map_err(|_| AppError::BadRequest("Invalid room ID format".to_string()))?;
+
+    // Ensure room exists
+    let room = state
+        .room_repo
+        .get_room(&room_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Room not found".to_string()))?;
+
+    // Create an invitation token (reusing existing model constructor)
+    let ttl_seconds = request.ttl_seconds.unwrap_or(86400);
+    let invitation = RoomInvitation::new(
+        room_id.clone(),
+        "system".to_string(), // TODO: Replace with real user_id when auth is enabled
+        ttl_seconds,
+        request.max_uses,
+    );
+
+    state.room_repo.create_invitation(&invitation).await?;
+
+    // Compute invite URL (consistent with create_invitation)
+    let invite_url = format!(
+        "http://{}:{}/invite/{}",
+        state.config.frontend_host.as_deref().unwrap_or("localhost"),
+        state.config.frontend_port.unwrap_or(3000),
+        invitation.token
+    );
+
+    let subject = request
+        .subject
+        .clone()
+        .unwrap_or_else(|| format!("TrueGather invite — {}", room.name));
+
+    let mut text = String::new();
+    if let Some(msg) = &request.message {
+        if !msg.trim().is_empty() {
+            text.push_str(msg.trim());
+            text.push_str("\n\n");
+        }
+    }
+
+    text.push_str(&format!(
+        "You are invited to join a TrueGather meeting.\n\nMeeting code:\n{}\n\nInvite link:\n{}\n",
+        room_id, invite_url
+    ));
+
+    // Send email
+    state
+        .mailer
+        .send_invite(request.emails.clone(), subject, text)
+        .await?;
+
+    Ok(Json(InviteEmailResponse {
+        sent: request.emails.len() as u32,
+        token: invitation.token,
+        invite_url,
+        room_id,
     }))
 }

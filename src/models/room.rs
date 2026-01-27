@@ -177,3 +177,26 @@ pub struct InvitationInfo {
     pub expires_at: DateTime<Utc>,
     pub is_valid: bool,
 }
+
+/// Request to send invitation emails
+#[derive(Debug, Deserialize)]
+pub struct InviteEmailRequest {
+    pub emails: Vec<String>,
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
+    #[serde(default)]
+    pub max_uses: Option<u32>,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Response after sending invitation emails
+#[derive(Debug, Serialize)]
+pub struct InviteEmailResponse {
+    pub sent: u32,
+    pub token: String,
+    pub invite_url: String,
+    pub room_id: String,
+}

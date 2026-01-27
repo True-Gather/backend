@@ -14,9 +14,13 @@ use truegather_backend::media::MediaGateway;
 use truegather_backend::redis::{create_pool, RoomRepository};
 use truegather_backend::state::AppState;
 use truegather_backend::ws::ws_routes;
+use truegather_backend::mail::Mailer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    tracing::info!("JWT_SECRET present? {}", std::env::var("JWT_SECRET").is_ok());
+
     // Initialize logging
     tracing_subscriber::registry()
         .with(fmt::layer())
@@ -55,7 +59,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Media gateway initialized");
 
     // Create application state
-    let state = AppState::new(config.clone(), auth, room_repo, media_gateway);
+    let mailer = Mailer::new_from_env()?;
+    let state = AppState::new(config.clone(), auth, room_repo, media_gateway, mailer);
 
     // Build router
     let app = Router::new()

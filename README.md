@@ -38,7 +38,39 @@ Backend sécurisé pour la plateforme de vidéoconférence TrueGather, utilisant
 
 ### Configuration
 
-1. Copier le fichier d'environnement:
+### ⚙️ Configuration (.env)
+
+## 1 Créer le fichier `.env`
+
+Le fichier `.env` **ne doit jamais être commité**.  
+Un template est fourni via `.env.example`.
+
+## 2 Générer un secret JWT (obligatoire)
+
+```bash
+openssl rand -hex 32
+```
+- Et le coller dans .env (Ici : JWT_SECRET=COLLE_ICI_LE_SECRET_GENERE
+)
+
+### 📧 Invitation par email (Resend)
+
+- TrueGather utilise Resend pour l’envoi des emails d’invitation.
+
+## 1 Créer une clé API Resend
+
+- Aller sur 👉 https://resend.com
+- Créer un compte
+- Aller dans Dashboard → API Keys
+- Cliquer sur Create API Key
+- Copier la clé générée
+
+## 2 Ajouter la clé dans .env
+
+RESEND_API_KEY=VOTRE_CLE_API_RESEND
+MAIL_FROM="TrueGather <onboarding@resend.dev>"
+
+
 ```bash
 cp .env.example .env
 ```
