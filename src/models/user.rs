@@ -2,9 +2,12 @@ use serde::{Deserialize, Serialize};
 
 /// Request to join a room
 #[derive(Debug, Deserialize)]
-pub struct JoinRequest {
+pub struct UserJoinRequest {
     pub display: String,
-    #[serde(default)]
+
+    /// Invite token / access code required for invite-only rooms.
+    /// Front sends `access_code`. We also accept `invite_token` as an alias.
+    #[serde(default, alias = "invite_token")]
     pub access_code: Option<String>,
 }
 

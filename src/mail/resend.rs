@@ -52,10 +52,7 @@ impl ResendMailer {
 
         if !res.status().is_success() {
             let body = res.text().await.unwrap_or_default();
-            return Err(AppError::BadRequest(format!(
-                "Resend API error: {}",
-                body
-            )));
+            return Err(AppError::BadRequest(format!("Resend API error: {}", body)));
         }
 
         Ok(())
