@@ -289,6 +289,7 @@ async fn join_room(
         token,
         ice_servers,
         expires_in: state.config.jwt_expiry_seconds,
+        participants: vec![],
     }))
 }
 
