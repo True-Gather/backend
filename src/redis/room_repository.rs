@@ -78,6 +78,44 @@ impl RoomRepository {
         }))
     }
 
+    /// List recent rooms (MVP)
+    pub async fn list_rooms(&self, limit: usize) -> Result<Vec<RoomInfo>> {
+        let mut conn = self.pool.get().await?;
+
+        // Get all keys room:*
+        let keys: Vec<String> = conn.keys("room:*").await?;
+
+        // Keep only exact keys: room:<uuid>
+        let mut room_ids: Vec<String> = keys
+            .into_iter()
+            .filter_map(|k| {
+                let parts: Vec<&str> = k.split(':').collect();
+                if parts.len() == 2 && parts[0] == "room" {
+                    Some(parts[1].to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut infos: Vec<RoomInfo> = Vec::new();
+
+        // Fetch RoomInfo for each id
+        for room_id in room_ids.drain(..) {
+            if let Some(info) = self.get_room_info(&room_id).await? {
+                infos.push(info);
+            }
+        }
+
+        // Sort most recent first
+        infos.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        // Apply limit
+        infos.truncate(limit.min(100));
+
+        Ok(infos)
+    }
+
     /// Delete a room
     pub async fn delete_room(&self, room_id: &str) -> Result<()> {
         let mut conn = self.pool.get().await?;
@@ -380,6 +418,35 @@ impl RoomRepository {
         Ok(pong == "PONG")
     }
 
+    // ==================== Creator Key (host access) ====================
+
+    pub async fn set_creator_key_hash(
+        &self,
+        room_id: &str,
+        hash: &str,
+        ttl_seconds: u64,
+    ) -> Result<()> {
+        let mut conn = self.pool.get().await?;
+        let key = format!("room:{}:creator_key_hash", room_id);
+
+        redis::cmd("SETEX")
+            .arg(&key)
+            .arg(ttl_seconds as i64)
+            .arg(hash)
+            .query_async::<()>(&mut *conn)
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn get_creator_key_hash(&self, room_id: &str) -> Result<Option<String>> {
+        let mut conn = self.pool.get().await?;
+        let key = format!("room:{}:creator_key_hash", room_id);
+
+        let v: Option<String> = conn.get(&key).await?;
+        Ok(v)
+    }
+
     // ==================== Invitation Operations ====================
 
     /// Create a room invitation
@@ -399,7 +466,8 @@ impl RoomRepository {
 
         // Also add to room's invitation set for tracking
         let room_invites_key = format!("room:{}:invites", invitation.room_id);
-        conn.sadd::<_, _, ()>(&room_invites_key, &invitation.token).await?;
+        conn.sadd::<_, _, ()>(&room_invites_key, &invitation.token)
+            .await?;
 
         tracing::info!(
             token = %invitation.token,

@@ -1,22 +1,37 @@
 use std::env;
 
+/// App config loaded from environment variables (.env)
 #[derive(Debug, Clone)]
 pub struct Config {
     pub server_host: String,
     pub server_port: u16,
     pub redis_url: String,
+
+    // JWT
     pub jwt_secret: String,
     pub jwt_expiry_seconds: u64,
+
+    // Rooms
     pub room_ttl_seconds: u64,
     pub max_publishers_per_room: u32,
+
+    // ICE
     pub stun_server: String,
     pub turn_server: Option<String>,
     pub turn_username: Option<String>,
     pub turn_credential: Option<String>,
+
+    // Mail
     pub mail_from: Option<String>,
     pub resend_api_key: Option<String>,
+
+    // Frontend base
     pub frontend_host: Option<String>,
     pub frontend_port: Option<u16>,
+
+    // ✅ Pepper/salt used to hash invitation codes + creator keys
+    // IMPORTANT: if you change this, all existing invites become invalid.
+    pub invite_code_salt: String,
 }
 
 impl Config {
@@ -29,32 +44,37 @@ impl Config {
                 .unwrap_or_else(|_| "8080".to_string())
                 .parse()
                 .map_err(|_| ConfigError::InvalidPort)?,
-            redis_url: env::var("REDIS_URL")
-                .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
+
+            redis_url: env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string()),
+
             jwt_secret: env::var("JWT_SECRET").map_err(|_| ConfigError::MissingJwtSecret)?,
             jwt_expiry_seconds: env::var("JWT_EXPIRY_SECONDS")
                 .unwrap_or_else(|_| "900".to_string())
                 .parse()
                 .unwrap_or(900),
+
             room_ttl_seconds: env::var("ROOM_TTL_SECONDS")
                 .unwrap_or_else(|_| "7200".to_string())
                 .parse()
                 .unwrap_or(7200),
+
             max_publishers_per_room: env::var("MAX_PUBLISHERS_PER_ROOM")
                 .unwrap_or_else(|_| "50".to_string())
                 .parse()
                 .unwrap_or(50),
-            stun_server: env::var("STUN_SERVER")
-                .unwrap_or_else(|_| "stun:stun.l.google.com:19302".to_string()),
+
+            stun_server: env::var("STUN_SERVER").unwrap_or_else(|_| "stun:stun.l.google.com:19302".to_string()),
             turn_server: env::var("TURN_SERVER").ok(),
             turn_username: env::var("TURN_USERNAME").ok(),
             turn_credential: env::var("TURN_CREDENTIAL").ok(),
+
             mail_from: env::var("MAIL_FROM").ok(),
             resend_api_key: env::var("RESEND_API_KEY").ok(),
+
             frontend_host: env::var("FRONTEND_HOST").ok(),
-            frontend_port: env::var("FRONTEND_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok()),
+            frontend_port: env::var("FRONTEND_PORT").ok().and_then(|p| p.parse().ok()),
+
+            invite_code_salt: env::var("INVITE_CODE_SALT").map_err(|_| ConfigError::MissingInviteCodeSalt)?,
         })
     }
 
@@ -69,4 +89,6 @@ pub enum ConfigError {
     InvalidPort,
     #[error("JWT_SECRET environment variable is required")]
     MissingJwtSecret,
+    #[error("INVITE_CODE_SALT environment variable is required")]
+    MissingInviteCodeSalt,
 }

@@ -82,6 +82,11 @@ mod tests {
             turn_server: None,
             turn_username: None,
             turn_credential: None,
+            frontend_host: Some("localhost".to_string()),
+            frontend_port: Some(3000),
+            mail_from: Some("noreply@truegather.test".to_string()),
+            resend_api_key: Some("test_resend_key".to_string()),
+            invite_code_salt: "test-salt".to_string(),
         }
     }
 

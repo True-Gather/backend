@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Room metadata stored in Redis
+/// Room persisted in Redis
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Room {
     pub room_id: String,
@@ -23,7 +23,6 @@ impl Room {
     }
 }
 
-/// Room information returned to clients
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomInfo {
     pub room_id: String,
@@ -35,7 +34,6 @@ pub struct RoomInfo {
     pub created_at: DateTime<Utc>,
 }
 
-/// Publisher information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublisherInfo {
     pub feed_id: String,
@@ -44,7 +42,6 @@ pub struct PublisherInfo {
     pub joined_at: DateTime<Utc>,
 }
 
-/// Room status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum RoomStatus {
@@ -78,21 +75,33 @@ pub struct CreateRoomResponse {
     pub created_at: DateTime<Utc>,
     pub max_publishers: u32,
     pub ttl_seconds: u64,
+
+    /// creator_key returned ONLY once (host device)
+    pub creator_key: String,
 }
 
-impl From<Room> for CreateRoomResponse {
-    fn from(room: Room) -> Self {
-        Self {
-            room_id: room.room_id,
-            name: room.name,
-            created_at: room.created_at,
-            max_publishers: room.max_publishers,
-            ttl_seconds: room.ttl_seconds,
-        }
-    }
+/// ✅ Join request for Option B (the only one rooms API uses)
+/// - Guest flow: invite_token + invite_code
+/// - Host flow: creator_key
+#[derive(Debug, Deserialize)]
+pub struct JoinRequest {
+    /// Display name shown in the room
+    pub display: String,
+
+    /// Guest flow (token from link)
+    #[serde(default)]
+    pub invite_token: Option<String>,
+
+    /// Guest flow (human code typed)
+    #[serde(default)]
+    pub invite_code: Option<String>,
+
+    /// Host flow (creator key stored on host device)
+    #[serde(default)]
+    pub creator_key: Option<String>,
 }
 
-/// Room invitation for sharing meeting links
+/// Room invitation stored in Redis
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomInvitation {
     pub token: String,
@@ -102,10 +111,24 @@ pub struct RoomInvitation {
     pub expires_at: DateTime<Utc>,
     pub max_uses: Option<u32>,
     pub uses: u32,
+
+    // reserved for future "per-email unique invite"
+    pub email: Option<String>,
+
+    /// ✅ hash of the code that guest must type (never store raw code)
+    pub code_hash: String,
 }
 
 impl RoomInvitation {
-    pub fn new(room_id: String, created_by: String, ttl_seconds: u64, max_uses: Option<u32>) -> Self {
+    /// Create a new invitation storing the code hash (Option B)
+    pub fn new_with_code_hash(
+        room_id: String,
+        created_by: String,
+        ttl_seconds: u64,
+        max_uses: Option<u32>,
+        email: Option<String>,
+        code_hash: String,
+    ) -> Self {
         let now = Utc::now();
         Self {
             token: Self::generate_token(),
@@ -115,6 +138,8 @@ impl RoomInvitation {
             expires_at: now + chrono::Duration::seconds(ttl_seconds as i64),
             max_uses,
             uses: 0,
+            email,
+            code_hash,
         }
     }
 
@@ -122,7 +147,7 @@ impl RoomInvitation {
         use rand::Rng;
         const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         let mut rng = rand::rng();
-        (0..16)
+        (0..24)
             .map(|_| {
                 let idx = rng.random_range(0..CHARSET.len());
                 CHARSET[idx] as char
@@ -130,6 +155,9 @@ impl RoomInvitation {
             .collect()
     }
 
+    /// Invite is valid if:
+    /// - not expired
+    /// - max_uses not reached (if max_uses exists)
     pub fn is_valid(&self) -> bool {
         let now = Utc::now();
         if now > self.expires_at {
@@ -144,21 +172,17 @@ impl RoomInvitation {
     }
 }
 
-/// Request to create an invitation
 #[derive(Debug, Deserialize)]
 pub struct CreateInvitationRequest {
-    /// TTL in seconds (default: 24 hours)
     #[serde(default = "default_invitation_ttl")]
     pub ttl_seconds: u64,
-    /// Maximum number of uses (None = unlimited)
     pub max_uses: Option<u32>,
 }
 
 fn default_invitation_ttl() -> u64 {
-    86400 // 24 hours
+    86400
 }
 
-/// Response after creating an invitation
 #[derive(Debug, Serialize)]
 pub struct CreateInvitationResponse {
     pub token: String,
@@ -168,7 +192,6 @@ pub struct CreateInvitationResponse {
     pub invite_url: String,
 }
 
-/// Response when validating an invitation
 #[derive(Debug, Serialize)]
 pub struct InvitationInfo {
     pub token: String,
@@ -178,7 +201,6 @@ pub struct InvitationInfo {
     pub is_valid: bool,
 }
 
-/// Request to send invitation emails
 #[derive(Debug, Deserialize)]
 pub struct InviteEmailRequest {
     pub emails: Vec<String>,
@@ -192,7 +214,6 @@ pub struct InviteEmailRequest {
     pub message: Option<String>,
 }
 
-/// Response after sending invitation emails
 #[derive(Debug, Serialize)]
 pub struct InviteEmailResponse {
     pub sent: u32,

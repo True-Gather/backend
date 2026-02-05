@@ -1,8 +1,9 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::{get, post},
     Json, Router,
 };
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::{AppError, Result};
@@ -16,11 +17,10 @@ use crate::state::AppState;
 /// Room routes
 pub fn room_routes() -> Router<AppState> {
     Router::new()
-        .route("/", post(create_room))
+        .route("/", get(list_rooms).post(create_room))
         .route("/{room_id}", get(get_room))
         .route("/{room_id}/join", post(join_room))
         .route("/{room_id}/leave", post(leave_room))
-        .route("/{room_id}/media_status", get(get_media_status))
         .route("/{room_id}/invite", post(create_invitation))
         .route("/{room_id}/invites", get(list_invitations))
         .route("/{room_id}/invite-email", post(send_invite_email))
@@ -28,23 +28,66 @@ pub fn room_routes() -> Router<AppState> {
         .route("/invite/{token}/use", post(use_invitation))
 }
 
+/// Hash helper (peppered) for invite codes + creator keys
+fn hash_code(pepper: &str, code: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(pepper.as_bytes());
+    h.update(b":");
+    h.update(code.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// Output is always "NNN-NNN" (if 6 digits), otherwise trimmed raw.
+fn normalize_invite_code(input: &str) -> String {
+    let trimmed = input.trim();
+
+    // keep only digits
+    let digits: String = trimmed.chars().filter(|c| c.is_ascii_digit()).collect();
+
+    if digits.len() == 6 {
+        format!("{}-{}", &digits[0..3], &digits[3..6])
+    } else {
+        // fallback: keep a simple trimmed form
+        trimmed.to_string()
+    }
+}
+
+/// Generates host-only creator key (stored locally on creator device)
+fn gen_creator_key() -> String {
+    use rand::Rng;
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = rand::rng();
+    (0..32)
+        .map(|_| {
+            let idx = rng.random_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
+}
+
+/// 6 digits, displayed like 761-221
+fn gen_invite_code() -> String {
+    use rand::Rng;
+    let mut rng = rand::rng();
+    let a: u16 = rng.random_range(0..1000);
+    let b: u16 = rng.random_range(0..1000);
+    format!("{:03}-{:03}", a, b)
+}
+
 /// POST /api/v1/rooms - Create a new room
 async fn create_room(
     State(state): State<AppState>,
     Json(request): Json<CreateRoomRequest>,
 ) -> Result<Json<CreateRoomResponse>> {
-    // Validate request
     if request.name.is_empty() {
         return Err(AppError::BadRequest("Room name is required".to_string()));
     }
-
     if request.name.len() > 100 {
         return Err(AppError::BadRequest(
             "Room name must be at most 100 characters".to_string(),
         ));
     }
 
-    // Create room
     let room = Room::new(
         request.name,
         request
@@ -57,12 +100,41 @@ async fn create_room(
         },
     );
 
-    // Save to Redis
+    // creator_key (host-only), returned once
+    let creator_key = gen_creator_key();
+    let creator_hash = hash_code(&state.config.invite_code_salt, creator_key.trim());
+
     state.room_repo.create_room(&room).await?;
+    state
+        .room_repo
+        .set_creator_key_hash(&room.room_id, &creator_hash, room.ttl_seconds)
+        .await?;
 
     tracing::info!(room_id = %room.room_id, name = %room.name, "Room created");
 
-    Ok(Json(CreateRoomResponse::from(room)))
+    Ok(Json(CreateRoomResponse {
+        room_id: room.room_id,
+        name: room.name,
+        created_at: room.created_at,
+        max_publishers: room.max_publishers,
+        ttl_seconds: room.ttl_seconds,
+        creator_key,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct ListRoomsQuery {
+    limit: Option<usize>,
+}
+
+/// GET /api/v1/rooms - List recent rooms
+async fn list_rooms(
+    State(state): State<AppState>,
+    Query(query): Query<ListRoomsQuery>,
+) -> Result<Json<Vec<crate::models::RoomInfo>>> {
+    let limit = query.limit.unwrap_or(20).min(100);
+    let rooms = state.room_repo.list_rooms(limit).await?;
+    Ok(Json(rooms))
 }
 
 /// GET /api/v1/rooms/:room_id - Get room information
@@ -70,7 +142,6 @@ async fn get_room(
     State(state): State<AppState>,
     Path(room_id): Path<String>,
 ) -> Result<Json<crate::models::RoomInfo>> {
-    // Validate UUID format
     Uuid::parse_str(&room_id)
         .map_err(|_| AppError::BadRequest("Invalid room ID format".to_string()))?;
 
@@ -83,22 +154,22 @@ async fn get_room(
     Ok(Json(room_info))
 }
 
-/// POST /api/v1/rooms/:room_id/join - Join a room
+/// POST /api/v1/rooms/:room_id/join - Option B join:
+/// - Host: creator_key
+/// - Guest: invite_token + invite_code
 async fn join_room(
     State(state): State<AppState>,
     Path(room_id): Path<String>,
     Json(request): Json<JoinRequest>,
 ) -> Result<Json<JoinResponse>> {
-    // Validate UUID format
     Uuid::parse_str(&room_id)
         .map_err(|_| AppError::BadRequest("Invalid room ID format".to_string()))?;
 
-    // Validate display name
-    if request.display.is_empty() {
+    let display = request.display.trim();
+    if display.is_empty() {
         return Err(AppError::BadRequest("Display name is required".to_string()));
     }
-
-    if request.display.len() > 100 {
+    if display.len() > 100 {
         return Err(AppError::BadRequest(
             "Display name must be at most 100 characters".to_string(),
         ));
@@ -111,55 +182,98 @@ async fn join_room(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Room {} not found", room_id)))?;
 
-    // Check room capacity
+    // Capacity check
     let member_count = state.room_repo.get_member_count(&room_id).await?;
     if member_count >= room.max_publishers as usize {
         return Err(AppError::RoomFull);
     }
 
-    // Generate user ID
+    // 1) Host flow (creator key)
+    if let Some(creator_key) = request
+        .creator_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let expected = state
+            .room_repo
+            .get_creator_key_hash(&room_id)
+            .await?
+            .ok_or_else(|| AppError::BadRequest("Access denied".to_string()))?;
+
+        let got = hash_code(&state.config.invite_code_salt, creator_key);
+        if got != expected {
+            return Err(AppError::BadRequest("Invalid creator key".to_string()));
+        }
+
+        // host join: no consume
+    } else {
+        // 2) Guest flow: invite_token + invite_code
+        let invite_token = request
+            .invite_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AppError::BadRequest("Invite token is required".to_string()))?;
+
+        let invite_code_raw = request
+            .invite_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AppError::BadRequest("Invitation code is required".to_string()))?;
+
+        let invitation = state
+            .room_repo
+            .get_invitation(invite_token)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Invitation not found or expired".to_string()))?;
+
+        if invitation.room_id != room_id {
+            return Err(AppError::BadRequest(
+                "Invitation does not match this room".to_string(),
+            ));
+        }
+        if !invitation.is_valid() {
+            return Err(AppError::BadRequest(
+                "Invitation is expired or has reached maximum uses".to_string(),
+            ));
+        }
+
+        // Normalize user input, then hash normalized form
+        let normalized = normalize_invite_code(invite_code_raw);
+        let got = hash_code(&state.config.invite_code_salt, &normalized);
+
+        if got != invitation.code_hash {
+            return Err(AppError::BadRequest("Invalid invitation code".to_string()));
+        }
+
+        // Consume only after verification
+        let ok = state.room_repo.use_invitation(invite_token).await?;
+        if !ok {
+            return Err(AppError::BadRequest(
+                "Invitation is expired or has reached maximum uses".to_string(),
+            ));
+        }
+    }
+
+    // Generate user id + JWT
     let user_id = Uuid::new_v4().to_string();
+    let token = state.auth.generate_token(&user_id, &room_id, display)?;
 
-    // Generate JWT token
-    let token = state
-        .auth
-        .generate_token(&user_id, &room_id, &request.display)?;
-
-    // Add user to room members
     state.room_repo.add_member(&room_id, &user_id).await?;
-
-    // Persist member display info so later joins can fetch full participant list
-    state
-        .room_repo
-        .set_member_info(&room_id, &user_id, &request.display)
-        .await?;
-
-    // Build WebSocket URL — advertise frontend host when available, fall back to localhost instead of 0.0.0.0
-    let advertised_host = state
-        .config
-        .frontend_host
-        .clone()
-        .unwrap_or_else(|| {
-            if state.config.server_host == "0.0.0.0" {
-                "localhost".to_string()
-            } else {
-                state.config.server_host.clone()
-            }
-        });
 
     let ws_url = format!(
         "ws://{}:{}/ws?room_id={}&token={}",
-        advertised_host, state.config.server_port, room_id, token
+        state.config.server_host, state.config.server_port, room_id, token
     );
 
-    // Build ICE servers list
     let mut ice_servers = vec![IceServer {
         urls: vec![state.config.stun_server.clone()],
         username: None,
         credential: None,
     }];
 
-    // Add TURN server if configured
     if let Some(turn_server) = &state.config.turn_server {
         ice_servers.push(IceServer {
             urls: vec![turn_server.clone()],
@@ -168,16 +282,6 @@ async fn join_room(
         });
     }
 
-    tracing::info!(
-        room_id = %room_id,
-        user_id = %user_id,
-        display = %request.display,
-        "User joined room"
-    );
-
-    // Fetch current participants (from persisted member infos)
-    let participants = state.room_repo.get_member_infos(&room_id).await?;
-
     Ok(Json(JoinResponse {
         room_id,
         user_id,
@@ -185,22 +289,17 @@ async fn join_room(
         token,
         ice_servers,
         expires_in: state.config.jwt_expiry_seconds,
-        participants,
+        participants: vec![],
     }))
 }
 
-/// POST /api/v1/rooms/:room_id/leave - Leave a room
+/// POST /api/v1/rooms/:room_id/leave
 async fn leave_room(
     State(_state): State<AppState>,
     Path(room_id): Path<String>,
-    // TODO: Extract user_id from JWT auth header
 ) -> Result<Json<serde_json::Value>> {
-    // Validate UUID format
     Uuid::parse_str(&room_id)
         .map_err(|_| AppError::BadRequest("Invalid room ID format".to_string()))?;
-
-    // For now, we'll handle leave through WebSocket
-    // This endpoint is for explicit HTTP leave if needed
 
     Ok(Json(serde_json::json!({ "success": true })))
 }
@@ -215,46 +314,44 @@ pub fn create_publisher_info(user_id: &str, feed_id: &str, display: &str) -> Pub
     }
 }
 
-/// POST /api/v1/rooms/:room_id/invite - Create an invitation link
+/// POST /api/v1/rooms/:room_id/invite
 async fn create_invitation(
     State(state): State<AppState>,
     Path(room_id): Path<String>,
     Json(request): Json<CreateInvitationRequest>,
 ) -> Result<Json<CreateInvitationResponse>> {
-    // Validate UUID format
     Uuid::parse_str(&room_id)
         .map_err(|_| AppError::BadRequest("Invalid room ID format".to_string()))?;
 
-    // Check room exists
-    let _room = state
+    state
         .room_repo
         .get_room(&room_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Room {} not found", room_id)))?;
 
-    // Create invitation
-    let invitation = RoomInvitation::new(
+    // Generate code + store normalized hash (important!)
+    let code = gen_invite_code();
+    let normalized = normalize_invite_code(&code);
+    let code_hash = hash_code(&state.config.invite_code_salt, &normalized);
+
+    let invitation = RoomInvitation::new_with_code_hash(
         room_id.clone(),
-        "system".to_string(), // TODO: Get from auth when implemented
+        "system".to_string(),
         request.ttl_seconds,
         request.max_uses,
+        None,
+        code_hash,
     );
 
-    // Save to Redis
     state.room_repo.create_invitation(&invitation).await?;
 
-    // Build invite URL
     let invite_url = format!(
-        "http://{}:{}/invite/{}",
-        state.config.frontend_host.as_deref().unwrap_or("localhost"),
-        state.config.frontend_port.unwrap_or(3000),
+        "{}/invite/{}",
+        state.config
+            .frontend_host
+            .as_deref()
+            .unwrap_or("http://localhost:3000"),
         invitation.token
-    );
-
-    tracing::info!(
-        room_id = %room_id,
-        token = %invitation.token,
-        "Invitation created"
     );
 
     Ok(Json(CreateInvitationResponse {
@@ -266,47 +363,25 @@ async fn create_invitation(
     }))
 }
 
-/// GET /api/v1/rooms/:room_id/media_status - Return current publishers and subscribers for debugging
-async fn get_media_status(
-    State(state): State<AppState>,
-    Path(room_id): Path<String>,
-) -> Result<Json<serde_json::Value>> {
-    // Validate UUID format
-    Uuid::parse_str(&room_id)
-        .map_err(|_| AppError::BadRequest("Invalid room ID format".to_string()))?;
-
-    let publishers = state.media_gateway.list_publishers(&room_id).await;
-    let subscribers = state.media_gateway.list_subscribers(&room_id).await;
-
-    Ok(Json(serde_json::json!({
-        "room_id": room_id,
-        "publishers": publishers,
-        "subscribers": subscribers
-    })))
-}
-
-/// GET /api/v1/rooms/:room_id/invites - List all invitations for a room
+/// GET /api/v1/rooms/:room_id/invites
 async fn list_invitations(
     State(state): State<AppState>,
     Path(room_id): Path<String>,
 ) -> Result<Json<Vec<RoomInvitation>>> {
-    // Validate UUID format
     Uuid::parse_str(&room_id)
         .map_err(|_| AppError::BadRequest("Invalid room ID format".to_string()))?;
 
-    // Check room exists
-    let _room = state
+    state
         .room_repo
         .get_room(&room_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Room {} not found", room_id)))?;
 
     let invitations = state.room_repo.get_room_invitations(&room_id).await?;
-
     Ok(Json(invitations))
 }
 
-/// GET /api/v1/rooms/invite/:token - Get invitation info
+/// GET /api/v1/rooms/invite/:token
 async fn get_invitation(
     State(state): State<AppState>,
     Path(token): Path<String>,
@@ -317,10 +392,8 @@ async fn get_invitation(
         .await?
         .ok_or_else(|| AppError::NotFound("Invitation not found or expired".to_string()))?;
 
-    // Check validity before moving values
     let is_valid = invitation.is_valid();
 
-    // Get room info
     let room = state
         .room_repo
         .get_room(&invitation.room_id)
@@ -336,7 +409,7 @@ async fn get_invitation(
     }))
 }
 
-/// POST /api/v1/rooms/invite/:token/use - Use an invitation
+/// POST /api/v1/rooms/invite/:token/use
 async fn use_invitation(
     State(state): State<AppState>,
     Path(token): Path<String>,
@@ -353,17 +426,13 @@ async fn use_invitation(
         ));
     }
 
-    // Get room info
     let room = state
         .room_repo
         .get_room(&invitation.room_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Room no longer exists".to_string()))?;
 
-    // Increment use count
     state.room_repo.use_invitation(&token).await?;
-
-    tracing::info!(token = %token, room_id = %invitation.room_id, "Invitation used");
 
     Ok(Json(InvitationInfo {
         token: invitation.token,
@@ -375,39 +444,46 @@ async fn use_invitation(
 }
 
 /// POST /api/v1/rooms/{room_id}/invite-email
-/// Sends an invitation email via configured mail provider (Resend).
+/// sends invite link + code and stores hash in Redis
 async fn send_invite_email(
     State(state): State<AppState>,
     Path(room_id): Path<String>,
     Json(request): Json<InviteEmailRequest>,
 ) -> Result<Json<InviteEmailResponse>> {
-    // Validate UUID format (same behavior as other endpoints)
     Uuid::parse_str(&room_id)
         .map_err(|_| AppError::BadRequest("Invalid room ID format".to_string()))?;
 
-    // Ensure room exists
     let room = state
         .room_repo
         .get_room(&room_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Room not found".to_string()))?;
 
-    // Create an invitation token (reusing existing model constructor)
     let ttl_seconds = request.ttl_seconds.unwrap_or(86400);
-    let invitation = RoomInvitation::new(
+
+    // generate code + store normalized hash
+    let code = gen_invite_code();
+    let normalized = normalize_invite_code(&code);
+    let code_hash = hash_code(&state.config.invite_code_salt, &normalized);
+
+    let invitation = RoomInvitation::new_with_code_hash(
         room_id.clone(),
-        "system".to_string(), // TODO: Replace with real user_id when auth is enabled
+        "system".to_string(),
         ttl_seconds,
         request.max_uses,
+        None,
+        code_hash,
     );
 
     state.room_repo.create_invitation(&invitation).await?;
 
-    // Compute invite URL (consistent with create_invitation)
     let invite_url = format!(
-        "http://{}:{}/invite/{}",
-        state.config.frontend_host.as_deref().unwrap_or("localhost"),
-        state.config.frontend_port.unwrap_or(3000),
+        "{}/room/{}/lobby?token={}",
+        state.config
+            .frontend_host
+            .as_deref()
+            .unwrap_or("http://localhost:3000"),
+        room_id,
         invitation.token
     );
 
@@ -425,11 +501,10 @@ async fn send_invite_email(
     }
 
     text.push_str(&format!(
-        "You are invited to join a TrueGather meeting.\n\nMeeting code:\n{}\n\nInvite link:\n{}\n",
-        room_id, invite_url
+        "You are invited to join a TrueGather meeting.\n\nMeeting:\n{}\n\nInvite link (token):\n{}\n\nInvitation code:\n{}\n",
+        room.name, invite_url, code
     ));
 
-    // Send email
     state
         .mailer
         .send_invite(request.emails.clone(), subject, text)
