@@ -10,16 +10,19 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use truegather_backend::api;
 use truegather_backend::auth::AuthService;
 use truegather_backend::config::Config;
+use truegather_backend::mail::Mailer;
 use truegather_backend::media::MediaGateway;
 use truegather_backend::redis::{create_pool, RoomRepository};
 use truegather_backend::state::AppState;
 use truegather_backend::ws::ws_routes;
-use truegather_backend::mail::Mailer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    tracing::info!("JWT_SECRET present? {}", std::env::var("JWT_SECRET").is_ok());
+    tracing::info!(
+        "JWT_SECRET present? {}",
+        std::env::var("JWT_SECRET").is_ok()
+    );
 
     // Initialize logging
     tracing_subscriber::registry()
@@ -75,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http());
 
     // Start server
-    let addr: SocketAddr = config.server_addr().parse()?;
+    let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port).parse()?;
     let listener = TcpListener::bind(addr).await?;
 
     tracing::info!(address = %addr, "Server listening");

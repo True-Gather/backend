@@ -12,15 +12,15 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-
 use crate::api::rooms::create_publisher_info;
 use crate::error::AppError;
 use crate::state::AppState;
-//Remplacer 
+//Remplacer
 use crate::ws::{
-    msg_types, ClientHandle, JoinRoomPayload, JoinedPayload, LeftRoomPayload, PublishAnswerPayload,
-    PublishOfferPayload, PublisherJoinedPayload, PublisherLeftPayload, PublisherPayload,
-    MemberJoinedPayload, MemberLeftPayload, SignalingMessage, SubscribeOfferPayload, SubscribePayload, TrickleIcePayload, WsSessionState,
+    msg_types, ClientHandle, JoinRoomPayload, JoinedPayload, LeftRoomPayload, MemberJoinedPayload,
+    MemberLeftPayload, PublishAnswerPayload, PublishOfferPayload, PublisherJoinedPayload,
+    PublisherLeftPayload, PublisherPayload, SignalingMessage, SubscribeOfferPayload,
+    SubscribePayload, TrickleIcePayload, WsSessionState,
 };
 
 /// Query parameters for WebSocket connection
@@ -168,7 +168,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: crate::models
             serde_json::to_value(MemberLeftPayload {
                 user_id: user_id.clone(),
                 room_id: room_id.clone(),
-            }) .unwrap(),
+            })
+            .unwrap(),
         );
 
         state
@@ -242,7 +243,13 @@ async fn handle_message(
 
     if msg_requires_join && !session.is_joined() {
         tracing::warn!(conn_id = %session.conn_id, msg_type = %msg.msg_type, "Client attempted signaling before joining room");
-        send_error(403, "Must join room before sending signaling messages", request_id.clone(), session, state);
+        send_error(
+            403,
+            "Must join room before sending signaling messages",
+            request_id.clone(),
+            session,
+            state,
+        );
         return Ok(());
     }
 
@@ -349,7 +356,10 @@ async fn handle_join_room(
     if let Some(room) = state.connections.get_room(&session.room_id) {
         for conn_id in room.get_all_client_ids() {
             if let Some(client) = room.get_client(&conn_id) {
-                if !participants_payloads.iter().any(|p| p.user_id == client.user_id) {
+                if !participants_payloads
+                    .iter()
+                    .any(|p| p.user_id == client.user_id)
+                {
                     let now = chrono::Utc::now().timestamp();
                     // Ensure we have persisted info for active in-memory clients
                     let _ = state
@@ -609,15 +619,22 @@ async fn handle_leave(
 
     // Perform cleanup now so the client leaves immediately
     if session.is_joined() {
-        let _ = state.room_repo.remove_member(&session.room_id, &session.user_id).await;
-        let _ = state.room_repo.remove_member_info(&session.room_id, &session.user_id).await;
+        let _ = state
+            .room_repo
+            .remove_member(&session.room_id, &session.user_id)
+            .await;
+        let _ = state
+            .room_repo
+            .remove_member_info(&session.room_id, &session.user_id)
+            .await;
 
         let left_msg = SignalingMessage::new(
             msg_types::MEMBER_LEFT,
             serde_json::to_value(MemberLeftPayload {
                 user_id: session.user_id.clone(),
                 room_id: session.room_id.clone(),
-            }) .unwrap(),
+            })
+            .unwrap(),
         );
 
         state

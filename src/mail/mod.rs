@@ -1,6 +1,6 @@
 pub mod resend;
 
-use crate::error::{AppError, Result};
+use crate::error::Result;
 
 #[derive(Clone)]
 pub struct Mailer {

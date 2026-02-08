@@ -550,4 +550,3 @@ impl MediaGateway {
         out
     }
 }
-

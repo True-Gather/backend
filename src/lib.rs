@@ -2,10 +2,11 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod error;
-pub mod media;
 pub mod mail;
+pub mod media;
 pub mod models;
 pub mod redis;
+pub mod security;
 pub mod state;
 pub mod ws;
 

@@ -4,6 +4,7 @@ use redis::AsyncCommands;
 
 use crate::error::{AppError, Result};
 use crate::models::{PublisherInfo, Room, RoomInfo, RoomInvitation, RoomStatus, WsSession};
+use crate::security::{ct_eq_hex, hash_secret_sha256_hex};
 
 /// Room repository for Redis operations
 #[derive(Clone)]
@@ -33,6 +34,41 @@ impl RoomRepository {
 
         tracing::info!(room_id = %room.room_id, "Room created");
         Ok(())
+    }
+
+    /// Store the host creator_key hash for a room (same TTL as the room).
+    pub async fn set_creator_key_hash(
+        &self,
+        room_id: &str,
+        creator_key_hash: &str,
+        ttl_seconds: u64,
+    ) -> Result<()> {
+        let mut conn = self.pool.get().await?;
+        let key = format!("room:{}:creator_key_hash", room_id);
+
+        redis::cmd("SETEX")
+            .arg(&key)
+            .arg(ttl_seconds as i64)
+            .arg(creator_key_hash)
+            .query_async::<()>(&mut *conn)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Verify creator_key against stored hash.
+    pub async fn verify_creator_key(&self, room_id: &str, creator_key: &str) -> Result<bool> {
+        let mut conn = self.pool.get().await?;
+        let key = format!("room:{}:creator_key_hash", room_id);
+        let stored: Option<String> = conn.get(&key).await?;
+
+        let Some(stored_hash) = stored else {
+            return Ok(false);
+        };
+
+        // room_id used as salt
+        let computed = hash_secret_sha256_hex(creator_key, room_id);
+        Ok(ct_eq_hex(&stored_hash, &computed))
     }
 
     /// Get room by ID
@@ -151,7 +187,8 @@ impl RoomRepository {
             "joined_at": chrono::Utc::now().timestamp()
         });
 
-        conn.hset::<_, _, _, ()>(&key, user_id, info.to_string()).await?;
+        conn.hset::<_, _, _, ()>(&key, user_id, info.to_string())
+            .await?;
 
         // Set TTL if room exists
         if let Some(room) = self.get_room(room_id).await? {
@@ -187,7 +224,10 @@ impl RoomRepository {
     }
 
     /// Get all member infos (user_id + display + joined_at)
-    pub async fn get_member_infos(&self, room_id: &str) -> Result<Vec<crate::models::user::MemberInfo>> {
+    pub async fn get_member_infos(
+        &self,
+        room_id: &str,
+    ) -> Result<Vec<crate::models::user::MemberInfo>> {
         let mut conn = self.pool.get().await?;
         let key = format!("room:{}:members_info", room_id);
 
@@ -399,7 +439,8 @@ impl RoomRepository {
 
         // Also add to room's invitation set for tracking
         let room_invites_key = format!("room:{}:invites", invitation.room_id);
-        conn.sadd::<_, _, ()>(&room_invites_key, &invitation.token).await?;
+        conn.sadd::<_, _, ()>(&room_invites_key, &invitation.token)
+            .await?;
 
         tracing::info!(
             token = %invitation.token,
@@ -425,6 +466,43 @@ impl RoomRepository {
         }
     }
 
+    /// Verify (token + code) and consume the invitation (used_count += 1).
+    /// Returns the invitation if valid.
+    pub async fn verify_and_use_invitation(
+        &self,
+        token: &str,
+        room_id: &str,
+        invite_code: &str,
+    ) -> Result<Option<RoomInvitation>> {
+        let invitation = match self.get_invitation(token).await? {
+            Some(inv) => inv,
+            None => return Ok(None),
+        };
+
+        // Token must belong to the room
+        if invitation.room_id != room_id {
+            return Ok(None);
+        }
+
+        if !invitation.is_valid() {
+            return Ok(None);
+        }
+
+        // ✅ code is verified using salt/hash stored in invitation
+        let computed = hash_secret_sha256_hex(invite_code, &invitation.code_salt);
+        if !ct_eq_hex(&invitation.code_hash, &computed) {
+            return Ok(None);
+        }
+
+        // ✅ consume ONE use (this modifies used_count and writes back to Redis)
+        let ok = self.use_invitation(token).await?;
+        if !ok {
+            return Ok(None);
+        }
+
+        Ok(self.get_invitation(token).await?)
+    }
+
     /// Increment invitation use count
     pub async fn use_invitation(&self, token: &str) -> Result<bool> {
         let mut invitation = match self.get_invitation(token).await? {
@@ -436,7 +514,8 @@ impl RoomRepository {
             return Ok(false);
         }
 
-        invitation.uses += 1;
+        // ✅ FIX: field name is used_count (not uses)
+        invitation.used_count += 1;
 
         let mut conn = self.pool.get().await?;
         let key = format!("invite:{}", token);
@@ -451,7 +530,13 @@ impl RoomRepository {
             .query_async::<()>(&mut *conn)
             .await?;
 
-        tracing::debug!(token = %token, uses = %invitation.uses, "Invitation used");
+        tracing::debug!(
+            token = %token,
+            used_count = %invitation.used_count,
+            max_uses = ?invitation.max_uses,
+            "Invitation used"
+        );
+
         Ok(true)
     }
 

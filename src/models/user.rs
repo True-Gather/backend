@@ -4,8 +4,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 pub struct JoinRequest {
     pub display: String,
-    #[serde(default)]
-    pub access_code: Option<String>,
+
+    /// Host flow (creator). If present and valid, no invite token/code is required.
+    #[serde(default, alias = "creatorKey")]
+    pub creator_key: Option<String>,
+
+    /// Guest flow. BOTH fields are required together.
+    #[serde(default, alias = "inviteToken")]
+    pub invite_token: Option<String>,
+    #[serde(default, alias = "inviteCode")]
+    pub invite_code: Option<String>,
 }
 
 /// Member info sent to clients

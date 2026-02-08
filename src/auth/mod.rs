@@ -82,6 +82,12 @@ mod tests {
             turn_server: None,
             turn_username: None,
             turn_credential: None,
+
+            // ✅ nouveaux champs
+            mail_from: None,
+            resend_api_key: None,
+            frontend_host: Some("localhost".to_string()),
+            frontend_port: Some(3000),
         }
     }
 

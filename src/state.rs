@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::auth::AuthService;
 use crate::config::Config;
-use crate::media::MediaGateway;
 use crate::mail::Mailer;
+use crate::media::MediaGateway;
 use crate::redis::RoomRepository;
 use crate::ws::ConnectionsManager;
 
